@@ -76,7 +76,7 @@ public class SliceMenu extends ListBedMenu {
         client.setMaxRetriesAndTimeout(0, 10000);
     }
 
-    private final static List<String> SUPPORTED_SEND = Collections.singletonList("octoprint");
+    private final static List<String> SUPPORTED_SEND = Arrays.asList("octoprint", "klipper");
     private int lastUid;
 
     @Override
@@ -129,51 +129,66 @@ public class SliceMenu extends ListBedMenu {
 
     private void upload(String type, String host, String apiKey, boolean print) {
         String name = fragment.getGlView().getRenderer().getGcodeResult().getRecommendedName();
+        if (!host.startsWith("http://")) {
+            host = "http://" + host;
+        }
+        String tag = UUID.randomUUID().toString();
+        SliceBeam.EVENT_BUS.fireEvent(new NeedSnackbarEvent(SnackbarsLayout.Type.LOADING, R.string.MenuSliceSendToPrinterLoading).tag(tag));
+        Header[] headers = TextUtils.isEmpty(apiKey) ? new Header[0] : new Header[] {new BasicHeader("X-Api-Key", apiKey)};
+        RequestParams params = new RequestParams();
+        try {
+            params.put("file", new FileInputStream(BedFragment.getTempGCodePath()), name, ContentType.TEXT_PLAIN.getMimeType());
+        } catch (FileNotFoundException e) {
+            throw new RuntimeException(e);
+        }
+        params.put("select", String.valueOf(print));
+        params.put("print", String.valueOf(print));
+
+        String url;
+        final boolean isKlipper = "klipper".equals(type);
         switch (type) {
-            default:
+            case "klipper":
+                url = host + "/server/files/upload";
+                break;
             case "octoprint":
-                if (!host.startsWith("http://")) {
-                    host = "http://" + host;
-                }
-                String tag = UUID.randomUUID().toString();
-                SliceBeam.EVENT_BUS.fireEvent(new NeedSnackbarEvent(SnackbarsLayout.Type.LOADING, R.string.MenuSliceSendToPrinterLoading).tag(tag));
-                Header[] headers = TextUtils.isEmpty(apiKey) ? new Header[0] : new Header[] {new BasicHeader("X-Api-Key", apiKey)};
-                RequestParams params = new RequestParams();
-                try {
-                    params.put("file", new FileInputStream(BedFragment.getTempGCodePath()), name, ContentType.TEXT_PLAIN.getMimeType());
-                } catch (FileNotFoundException e) {
-                    throw new RuntimeException(e);
-                }
-                params.put("select", String.valueOf(print));
-                params.put("print", String.valueOf(print));
-
-                client.post(SliceBeam.INSTANCE, host + "/api/files/local", headers, params, null, new AsyncHttpResponseHandler() {
-                    @Override
-                    public void onSuccess(int statusCode, Header[] headers, byte[] responseBody) {
-                        try {
-                            JSONObject obj = new JSONObject(new String(responseBody));
-                            if (!obj.has("action") && !obj.has("files")) {
-                                throw new JSONException(obj.toString());
-                            }
-                            SliceBeam.EVENT_BUS.fireEvent(new NeedDismissSnackbarEvent(tag));
-                            SliceBeam.EVENT_BUS.fireEvent(new NeedSnackbarEvent(print ? SnackbarsLayout.Type.INFO : SnackbarsLayout.Type.DONE, print ? R.string.MenuSliceSendToPrinterPrintStarted : R.string.MenuSliceSendToPrinterOK));
-                        } catch (JSONException e) {
-                            onFailure(statusCode, headers, responseBody, e);
-                        }
-                    }
-
-                    @Override
-                    public void onFailure(int statusCode, Header[] headers, byte[] responseBody, Throwable error) {
-                        SliceBeam.EVENT_BUS.fireEvent(new NeedDismissSnackbarEvent(tag));
-                        ViewUtils.postOnMainThread(() -> new BeamAlertDialogBuilder(fragment.getContext())
-                                .setTitle(R.string.MenuSliceSendToPrinterFailed)
-                                .setMessage(error.toString())
-                                .setPositiveButton(android.R.string.ok, null)
-                                .show());
-                    }
-                });
+            default:
+                url = host + "/api/files/local";
                 break;
         }
+
+        client.post(SliceBeam.INSTANCE, url, headers, params, null, new AsyncHttpResponseHandler() {
+            @Override
+            public void onSuccess(int statusCode, Header[] headers, byte[] responseBody) {
+                try {
+                    JSONObject obj = new JSONObject(new String(responseBody));
+                    boolean success;
+                    if (isKlipper) {
+                        // Moonraker: check for "filename" and "path"
+                        success = obj.has("filename") && obj.has("path");
+                    } else {
+                        // OctoPrint: check for "action" or "files"
+                        success = obj.has("action") || obj.has("files");
+                    }
+                    if (!success) {
+                        throw new JSONException("Unexpected response: " + obj.toString());
+                    }
+                    SliceBeam.EVENT_BUS.fireEvent(new NeedDismissSnackbarEvent(tag));
+                    SliceBeam.EVENT_BUS.fireEvent(new NeedSnackbarEvent(print ? SnackbarsLayout.Type.INFO : SnackbarsLayout.Type.DONE, print ? R.string.MenuSliceSendToPrinterPrintStarted : R.string.MenuSliceSendToPrinterOK));
+                } catch (JSONException e) {
+                    onFailure(statusCode, headers, responseBody, e);
+                }
+            }
+
+            @Override
+            public void onFailure(int statusCode, Header[] headers, byte[] responseBody, Throwable error) {
+                SliceBeam.EVENT_BUS.fireEvent(new NeedDismissSnackbarEvent(tag));
+                ViewUtils.postOnMainThread(() -> new BeamAlertDialogBuilder(fragment.getContext())
+                        .setTitle(R.string.MenuSliceSendToPrinterFailed)
+                        .setMessage(error.toString())
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show());
+            }
+        });
     }
 
     @Override
